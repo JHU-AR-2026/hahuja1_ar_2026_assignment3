@@ -53,8 +53,7 @@ const createScene = async () => {
 
   const spawnModel = async () => {
     const result = await BABYLON.SceneLoader.ImportMeshAsync("", MODEL_ROOT, MODEL_FILE, scene);
-    const mesh = new BABYLON.TransformNode("spawnedModel", scene);
-    result.meshes[0].parent = mesh;
+    const mesh = result.meshes[0];
 
     mesh.position = lastHitPosition.clone();
     mesh.rotation.y = lastHitRotationY;
@@ -66,23 +65,14 @@ const createScene = async () => {
     initialScaling = mesh.scaling.clone();
   };
 
-  // Run fn once when a button goes down (state-changed also fires on analog value changes while held)
-  const onPress = (component, fn) => {
-    let wasPressed = false;
-    component.onButtonStateChangedObservable.add(() => {
-      if (component.pressed && !wasPressed) fn();
-      wasPressed = component.pressed;
-    });
-  };
-
   xr.input.onControllerAddedObservable.add((controller) => {
     controller.onMotionControllerInitObservable.add((motionController) => {
       const handedness = controller.inputSource.handedness;
 
       if (handedness === "right") {
         const trigger = motionController.getComponent("xr-standard-trigger");
-        onPress(trigger, () => {
-          if (lastHitPosition) {
+        trigger.onButtonStateChangedObservable.add(() => {
+          if (trigger.pressed && lastHitPosition) {
             spawnModel();
           }
         });
@@ -94,15 +84,15 @@ const createScene = async () => {
         });
 
         const aButton = motionController.getComponent("a-button");
-        onPress(aButton, () => {
-          if (lastSpawned) {
+        aButton.onButtonStateChangedObservable.add(() => {
+          if (aButton.pressed && lastSpawned) {
             lastSpawned.scaling.scaleInPlace(1.1);
           }
         });
 
         const bButton = motionController.getComponent("b-button");
-        onPress(bButton, () => {
-          if (lastSpawned) {
+        bButton.onButtonStateChangedObservable.add(() => {
+          if (bButton.pressed && lastSpawned) {
             lastSpawned.scaling.scaleInPlace(1 / 1.1);
           }
         });
@@ -115,8 +105,8 @@ const createScene = async () => {
         });
 
         const xButton = motionController.getComponent("x-button");
-        onPress(xButton, () => {
-          if (lastSpawned) {
+        xButton.onButtonStateChangedObservable.add(() => {
+          if (xButton.pressed && lastSpawned) {
             lastSpawned.position = initialPosition.clone();
             lastSpawned.rotation.y = initialRotationY;
             lastSpawned.scaling = initialScaling.clone();
