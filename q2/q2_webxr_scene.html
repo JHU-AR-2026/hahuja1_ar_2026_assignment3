@@ -1,0 +1,154 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Assignment 3 - Q2 WebXR</title>
+  <style>html, body, #renderCanvas { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; }</style>
+  <script src="https://cdn.babylonjs.com/babylon.js"></script>
+  <script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
+</head>
+<body>
+<canvas id="renderCanvas"></canvas>
+<script>
+const canvas = document.getElementById("renderCanvas");
+const engine = new BABYLON.Engine(canvas, true);
+
+// --- Replace with the path to the model you picked in Q2.a (.glb/.gltf) ---
+const MODEL_ROOT = "./assets/";
+const MODEL_FILE = "of_planes_and_satellites.glb";
+
+const createScene = async () => {
+  const scene = new BABYLON.Scene(engine);
+  const light = new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0, 1, 0), scene);
+
+  // Q2.a prerequisite: load the chosen model once as a hidden template to clone from
+  const container = await BABYLON.SceneLoader.LoadAssetContainerAsync(MODEL_ROOT, MODEL_FILE, scene);
+  const template = container.meshes[0];
+  template.setEnabled(false); // template itself is never shown directly
+
+  // AR setup (see through the real room)
+  scene.clearColor = new BABYLON.Color4(0, 0, 0, 0);
+  const xr = await scene.createDefaultXRExperienceAsync({
+    uiOptions: { sessionMode: "immersive-ar", referenceSpaceType: "local-floor" },
+    disableTeleportation: true,
+  });
+
+  // Q2.b - Hit test feature: finds where a ray hits a real-world surface
+  const hitTest = xr.baseExperience.featuresManager.enableFeature(
+    BABYLON.WebXRFeatureName.HIT_TEST, "latest"
+  );
+  let lastHitTestPose = null; // { position, rotationQuaternion }
+  hitTest.onHitTestResultObservable.add((results) => {
+    if (results.length > 0) {
+      lastHitTestPose = { position: results[0].position, rotationQuaternion: results[0].rotationQuaternion };
+    }
+  });
+
+  // Bookkeeping for "most recently spawned" model (Q2.c-f all act on this one)
+  let lastSpawned = null;
+  let lastSpawnedInitial = null; // stored position/rotationQuaternion/scaling at spawn time
+
+  // Continuous per-frame input state, updated by the axis/button observables below
+  const moveInput = { x: 0, y: 0 };   // right thumbstick -> Q2.c
+  const rotateInput = { x: 0 };       // left thumbstick  -> Q2.d
+  const MOVE_SPEED = 1.0;             // meters/second
+  const ROTATE_SPEED = 2.0;           // radians/second
+  const SCALE_STEP = 1.02;            // per-frame multiplicative step while held
+
+  let scaleUpHeld = false;
+  let scaleDownHeld = false;
+
+  xr.input.onControllerAddedObservable.add((controller) => {
+    controller.onMotionControllerInitObservable.add((motionController) => {
+      const handedness = controller.inputSource.handedness; // "right" or "left"
+
+      if (handedness === "right") {
+        // Q2.b - right trigger spawns the model at the last hit test location
+        const trigger = motionController.getComponent("xr-standard-trigger");
+        trigger.onButtonStateChangedObservable.add(() => {
+          if (trigger.pressed && lastHitTestPose) {
+            const instance = template.clone("spawnedModel", null);
+            instance.setEnabled(true);
+            instance.position.copyFrom(lastHitTestPose.position);
+            if (lastHitTestPose.rotationQuaternion) {
+              instance.rotationQuaternion = lastHitTestPose.rotationQuaternion.clone();
+            } else {
+              instance.rotationQuaternion = BABYLON.Quaternion.Identity();
+            }
+            instance.scaling = new BABYLON.Vector3(1, 1, 1);
+
+            lastSpawned = instance;
+            lastSpawnedInitial = {
+              position: instance.position.clone(),
+              rotationQuaternion: instance.rotationQuaternion.clone(),
+              scaling: instance.scaling.clone(),
+            };
+          }
+        });
+
+        // Q2.c - right thumbstick moves the most recently spawned model on the horizontal plane
+        const moveStick = motionController.getComponent("xr-standard-thumbstick");
+        moveStick.onAxisValueChangedObservable.add((axes) => {
+          moveInput.x = axes.x;
+          moveInput.y = axes.y;
+        });
+
+        // Q2.e - A/B buttons scale the most recently spawned model up/down
+        const aButton = motionController.getComponent("a-button");
+        aButton.onButtonStateChangedObservable.add(() => { scaleUpHeld = aButton.pressed; });
+        const bButton = motionController.getComponent("b-button");
+        bButton.onButtonStateChangedObservable.add(() => { scaleDownHeld = bButton.pressed; });
+      }
+
+      if (handedness === "left") {
+        // Q2.d - left thumbstick rotates the most recently spawned model about world Y
+        const rotateStick = motionController.getComponent("xr-standard-thumbstick");
+        rotateStick.onAxisValueChangedObservable.add((axes) => {
+          rotateInput.x = axes.x;
+        });
+
+        // Q2.f - left X button resets the most recently spawned model
+        const xButton = motionController.getComponent("x-button");
+        xButton.onButtonStateChangedObservable.add(() => {
+          if (xButton.pressed && lastSpawned && lastSpawnedInitial) {
+            lastSpawned.position.copyFrom(lastSpawnedInitial.position);
+            lastSpawned.rotationQuaternion = lastSpawnedInitial.rotationQuaternion.clone();
+            lastSpawned.scaling.copyFrom(lastSpawnedInitial.scaling);
+          }
+          // If nothing has spawned yet, lastSpawned is null and we simply do nothing - no error.
+        });
+      }
+    });
+  });
+
+  // Apply continuous movement/rotation/scaling every frame (Q2.c, d, e)
+  scene.onBeforeRenderObservable.add(() => {
+    if (!lastSpawned) return;
+    const dt = engine.getDeltaTime() / 1000; // seconds
+
+    if (moveInput.x !== 0 || moveInput.y !== 0) {
+      lastSpawned.position.x += moveInput.x * MOVE_SPEED * dt;
+      lastSpawned.position.z += -moveInput.y * MOVE_SPEED * dt; // pushing stick forward = -y
+    }
+
+    if (rotateInput.x !== 0) {
+      // lastSpawned.rotationQuaternion is set (at spawn and on reset), so Babylon reads
+      // orientation from it, not from .rotation - rotate by composing an extra Y rotation:
+      const deltaY = BABYLON.Quaternion.FromEulerAngles(0, rotateInput.x * ROTATE_SPEED * dt, 0);
+      lastSpawned.rotationQuaternion = deltaY.multiply(lastSpawned.rotationQuaternion);
+    }
+
+    if (scaleUpHeld) lastSpawned.scaling.scaleInPlace(SCALE_STEP);
+    if (scaleDownHeld) lastSpawned.scaling.scaleInPlace(1 / SCALE_STEP);
+  });
+
+  return scene;
+};
+
+createScene().then((scene) => {
+  engine.runRenderLoop(() => scene.render());
+});
+window.addEventListener("resize", () => engine.resize());
+</script>
+</body>
+</html>
