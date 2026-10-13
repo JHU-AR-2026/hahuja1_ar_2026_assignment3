@@ -26,19 +26,28 @@ const createScene = async () => {
     disableTeleportation: true,
   });
 
-  const hitTest = xr.baseExperience.featuresManager.enableFeature(
-    BABYLON.WebXRFeatureName.HIT_TEST, "latest"
+  const sessionManager = xr.baseExperience.sessionManager;
+
+  xr.baseExperience.featuresManager.enableFeature(
+    BABYLON.WebXRFeatureName.HIT_TEST, "latest", { disablePermanentHitTest: true }
   );
 
+  let hitTestSource = null;
   let lastHitPosition = null;
   let lastHitRotationY = 0;
 
-  hitTest.onHitTestResultObservable.add((results) => {
+  sessionManager.onXRFrameObservable.add((frame) => {
+    if (!hitTestSource) return;
+    const results = frame.getHitTestResults(hitTestSource);
     if (results.length > 0) {
-      lastHitPosition = results[0].position;
-      lastHitRotationY = results[0].rotationQuaternion
-        ? results[0].rotationQuaternion.toEulerAngles().y
-        : 0;
+      const pose = results[0].getPose(sessionManager.referenceSpace);
+      if (pose) {
+        lastHitPosition = new BABYLON.Vector3(
+          pose.transform.position.x, pose.transform.position.y, pose.transform.position.z
+        );
+        const o = pose.transform.orientation;
+        lastHitRotationY = new BABYLON.Quaternion(o.x, o.y, o.z, o.w).toEulerAngles().y;
+      }
     }
   });
 
@@ -54,6 +63,7 @@ const createScene = async () => {
   const spawnModel = async () => {
     const result = await BABYLON.SceneLoader.ImportMeshAsync("", MODEL_ROOT, MODEL_FILE, scene);
     const mesh = result.meshes[0];
+    mesh.rotationQuaternion = null;
 
     mesh.position = lastHitPosition.clone();
     mesh.rotation.y = lastHitRotationY;
@@ -66,10 +76,18 @@ const createScene = async () => {
   };
 
   xr.input.onControllerAddedObservable.add((controller) => {
-    controller.onMotionControllerInitObservable.add((motionController) => {
+    controller.onMotionControllerInitObservable.add(async (motionController) => {
       const handedness = controller.inputSource.handedness;
 
       if (handedness === "right") {
+        try {
+          hitTestSource = await sessionManager.session.requestHitTestSource({
+            space: controller.inputSource.targetRaySpace,
+          });
+        } catch (err) {
+          console.error("requestHitTestSource failed:", err);
+        }
+
         const trigger = motionController.getComponent("xr-standard-trigger");
         trigger.onButtonStateChangedObservable.add(() => {
           if (trigger.pressed && lastHitPosition) {
